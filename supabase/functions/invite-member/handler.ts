@@ -1,0 +1,129 @@
+// Request handling for the invite-member Edge Function (ADR-0029, ADR-0030). Platform Owner only, on every action, at
+// the 2FA level the staff policy requires (R-W1-1).
+//   POST { action: "invite", email, role: "admin"|"team", note? } → creates the invited member and emails a /join link
+//   POST { action: "resend", memberId }                         → a new link for someone still invited (the old one stops working)
+// The link secret is 32 random bytes; only its SHA-256 is stored. The secret goes into the email only: it is never
+// returned, logged or put in the audit log. A provider failure is reported as email_failed, never as sent.
+// The email lists the role's permissions at send time; the note is stored on the invite, and a resend reuses the
+// newest invite's note (R-W6-5).
+import { type ConfigResult, type LogEntry, SAFE_EMAIL_REASONS, sendAndLog } from '../_shared/email.ts'
+import { renderEmail } from '../_shared/email-templates.ts'
+import { type GateResult, gateReply } from '../_shared/gate.ts'
+import { UUID, bearerToken, readJsonObject, reply } from '../_shared/http.ts'
+import { type MemberRole, hashSecret, newInviteSecret } from '../_shared/team.ts'
+
+export const INVITE_DAYS = 7
+const NOTE_MAX = 500
+
+type DbResult<T> = ({ ok: true } & T) | { error: string }
+
+export interface InviteDeps {
+  config: ConfigResult
+  fetch: typeof fetch
+  now?: () => Date
+  userIdFromToken(token: string): Promise<string | null>
+  /** The 2FA gate with the caller's own token (R-W1-1): caller_mfa_satisfied(), then is_platform_admin(). */
+  gate(token: string): Promise<GateResult>
+  /** admin_invite_member, called with the caller's own token so the database re-checks the Owner. */
+  inviteMember(token: string, email: string, role: MemberRole): Promise<DbResult<{ memberId: string }>>
+  getMember(id: string): Promise<{ id: string; email: string; role: MemberRole; status: string } | null>
+  /** service_create_member_invite; the note (or null) is stored on the invite. */
+  createInvite(memberId: string, tokenHash: string, expiresAt: string, actorId: string, note: string | null): Promise<DbResult<{ inviteId: string }>>
+  /** The role's permission keys now (platform_role_permissions), for the email's bullets. */
+  rolePermissions(role: MemberRole): Promise<string[]>
+  /** The note of the member's newest invite, or null (service_latest_invite_note). */
+  latestNote(memberId: string): Promise<string | null>
+  recordEmail(inviteId: string, ok: boolean, detail: string): Promise<void>
+  inviterName(userId: string): Promise<string | null>
+  logDenied(actorId: string, action: string): Promise<void>
+  log(entry: LogEntry): Promise<string>
+}
+
+const STATUS_FOR: Record<string, number> = {
+  forbidden: 403, already_member: 409, business_owner: 409, owner_protected: 409, not_invited: 409,
+  invalid_email: 422, rate_limited: 429, not_found: 404,
+}
+
+export async function handleInviteMember(req: Request, deps: InviteDeps): Promise<Response> {
+  if (req.method === 'OPTIONS') return reply(204)
+  if (req.method !== 'POST') return reply(405, { error: 'method_not_allowed' })
+
+  const token = bearerToken(req)
+  const actorId = token ? await deps.userIdFromToken(token) : null
+  if (!actorId) return reply(401, { error: 'not_signed_in' })
+
+  const body = await readJsonObject(req, 4_000)
+  const action = body?.action
+  if (!body || (action !== 'invite' && action !== 'resend')) return reply(400, { error: 'invalid_request' })
+
+  const gate = await deps.gate(token)
+  if (gate !== 'ok') {
+    // A missing permission is an access-denied event; an Owner asked for the 2FA step is not.
+    if (gate === 'forbidden') await deps.logDenied(actorId, action === 'invite' ? 'invite_member' : 'resend_member_invite')
+    return gateReply(gate)
+  }
+  if (!deps.config.ok) return reply(503, { error: 'not_configured' })
+  const config = deps.config.config
+  if (!/^https:\/\/[^\s/]+$/.test(config.appBaseUrl)) return reply(503, { error: 'not_configured' })
+
+  let memberId: string
+  let note: string | undefined
+  if (action === 'invite') {
+    const email = typeof body.email === 'string' ? body.email : ''
+    const role = body.role
+    note = typeof body.note === 'string' && body.note.trim() ? body.note.trim() : undefined
+    if (role !== 'admin' && role !== 'team') return reply(422, { error: 'invalid_role' })
+    if (note && note.length > NOTE_MAX) return reply(422, { error: 'note_too_long' })
+    const r = await deps.inviteMember(token, email, role)
+    if ('error' in r) return reply(STATUS_FOR[r.error] ?? 400, { error: r.error })
+    memberId = r.memberId
+  } else {
+    if (typeof body.memberId !== 'string' || !UUID.test(body.memberId)) return reply(400, { error: 'invalid_request' })
+    memberId = body.memberId
+    note = (await deps.latestNote(memberId)) ?? undefined
+  }
+
+  const member = await deps.getMember(memberId)
+  if (!member) return reply(404, { error: 'not_found' })
+  if (member.status !== 'invited') return reply(409, { error: 'not_invited' })
+
+  const now = (deps.now ?? (() => new Date()))()
+  const expiresAt = new Date(now.getTime() + INVITE_DAYS * 86_400_000).toISOString()
+  // Read before the invite is created, so a failed read leaves no unsent link behind.
+  const permissions = await deps.rolePermissions(member.role)
+  const secret = newInviteSecret()
+  const invite = await deps.createInvite(member.id, await hashSecret(secret), expiresAt, actorId, note ?? null)
+  if ('error' in invite) return reply(STATUS_FOR[invite.error] ?? 400, { error: invite.error })
+
+  const email = renderEmail('team_invitation', 'en', {
+    role: member.role,
+    permissions,
+    note,
+    expiresAt,
+    inviterName: (await deps.inviterName(actorId)) ?? undefined,
+    actionUrl: `${config.appBaseUrl}/join#t=${secret}`,
+  })
+  const sent = await sendAndLog(
+    { config, fetch: deps.fetch, log: deps.log },
+    {
+      to: member.email,
+      subject: email.subject,
+      html: email.html,
+      text: email.text,
+      kind: 'team_invitation',
+      workflow: `team_invite:${member.id}`,
+      triggeredBy: actorId,
+      idempotencyKey: `team_invite:${invite.inviteId}`,
+    },
+  )
+  const ok = sent.status === 'accepted'
+  await deps.recordEmail(invite.inviteId, ok, ok ? '' : (sent.error ?? sent.status))
+  return reply(200, {
+    memberId: member.id,
+    status: ok ? 'sent' : 'email_failed',
+    sentAt: now.toISOString(),
+    expiresAt,
+    // Only a fixed reason code reaches the browser; provider text stays in email_log.
+    ...(!ok && sent.error && SAFE_EMAIL_REASONS.has(sent.error) ? { error: sent.error } : {}),
+  })
+}
