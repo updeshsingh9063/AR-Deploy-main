@@ -1,0 +1,139 @@
+# Sanctus: project completion status
+
+**Last updated:** 2026-10-26
+**Branch:** `feature/sanctus-brand-design-system`, pushed. Last pushed commit: `b7b4688` (2026-10-26). The test environment for client review is `https://sanctus.warpkit.online`, which serves this branch (a Vercel Preview) with the client project. It is the live site as of 2026-10-27; `main` is not part of it.
+**Data:** the client project `zggylkbgajamhriebdrg`, which the live site uses (checked 2026-10-27: 18 migrations applied, 13 Edge Functions active; see `System_arch/HANDOFF.md` Live state). The old dev project `pmnjchhrgvajtjpadpqo` (not used) and `main` are untouched.
+
+This is the single place for **what is done, what is blocked and what decides the release**. Detailed evidence is linked, not repeated.
+
+## 1. Completed and verified
+
+| Area | What | Commits | Evidence |
+|---|---|---|---|
+| Brand and landing | Sanctus design system, EN/PT landing | `ff0820e` | e2e `landing.spec.ts` |
+| Onboarding | Apply wizard, admin review (approve or reject), one owner per business, invitation, password setup, audit log | `71aed48`, `e2c1e74` | e2e `applications.spec.ts`. Preview QA: apply → approve → invite → accept passed in the real UI (`docs/SANCTUS_DASHBOARD_TEST_RESULTS.md`). |
+| Invitation security | Pre-registered accounts and second businesses refused (SEC-20, COR-16). Other sessions signed out after a password is set (SEC-26). | `e2c1e74` | `provision-owner` handler tests. Deployed to zggyl. |
+| Owner dashboard | Next steps, draft and paused notices, catalogue preview, product QR (ADR-0025), AR readiness, analytics labelled "AR launch attempts" | `a1e8392`, `422481b` | Journeys A–G on the Preview: 98 PASS (`docs/dashboard-audit/qa-journeys.md`) |
+| Variant media | Photos, GLB and USDZ per finish; `?variant=` links | `a1e8392` | Migration `20261020143507` applied to zggyl. Journey C passed. 8 PGlite tests. |
+| 3D/AR hardening | GLB/USDZ content checks, Scene Viewer extension warning, no duplicate AR events, error states | `a1e8392` | `docs/SANCTUS_3D_AR_QA_REPORT.md` |
+| Owner isolation | RLS and storage isolation | n/a | About 100 PGlite probes, plus REST checks with the QA owner's own session on the Preview (0 rows elsewhere) |
+| Copy and motion | No dash placeholders in tables, analytics or emails. JS smooth scrolling respects reduced motion (CSS already did). | `608b2ad` | Unit tests |
+| Test stability | Worker cap and timeouts; the suite went from intermittent timeouts to stable | `f00f7c7` | 4 consecutive full runs green |
+| Website embedding (ADR-0026) | `/embed/products/...` and a dashboard snippet | `a350156` | Live on the Preview: `/embed/*` sends `frame-ancestors *` and every other path sends `'none'`. Rendered inside a cross-origin page on desktop and Pixel 7, with the AR link opening the full page in a new tab. |
+| Security hardening migration `20261024065538` | Owner column allow-list, https media, path shape, AR events need a model, slug audit, safe onboarding | `8df5b42` | Pre-check clean, then applied to zggyl on 2026-10-24. Live checks passed afterwards (owner product save, settings save, unpublish and re-publish, view and AR attempt 204). Generated types unchanged, no new advisor findings. |
+| Auth settings (zggyl) | Recorded 2026-10-24, not re-checked since (a 2026-10-20 QA note saw Site URL `http://localhost:3000/`; unverified, see `System_arch/HANDOFF.md`): Site URL = Preview; exact redirects for `/login`, `/reset-password` and `/accept-invite` (plus localhost for dev); public sign-up refused (`signup_disabled` verified); minimum password length 12 | n/a | Verified by sign-in (200) and a sign-up probe (422) |
+| Email functions redeployed | `submit-application`, `provision-owner`, `send-test-email` | n/a | Preflight 204 |
+| Email delivery (Resend) | All secrets set: a new sending-only key "Sanctus server 2026-10-24" (temporary, the owner will replace it), the test sender `onboarding@resend.dev`, the Preview as `APP_BASE_URL`, a test admin inbox, and the signed webhook | n/a | 2026-10-24 on the Preview: applicant confirmation, admin notification and owner invitation all reached **delivered** through the signed webhook (`email_log`, application `ABE43EC0` and business "QA Preview Atelier 10201001") |
+| Password reset | `/reset-password` crashed on the Preview ("Something went wrong": the page uses `t()` but its route sat outside the `LanguageProvider`). Moved under the public layout. Auth emails now go through Resend SMTP. | `26c03a5` | e2e regression test. On the Preview, 2026-10-24: a reset for the QA owner's test inbox was **delivered** by Resend (sender "Sanctus"), and its link opened the Preview's "Choose a new password" form. The password was not changed. |
+| Leaked-password protection | `password_hibp_enabled = true` on zggyl | n/a | Management API read-back |
+| **Account settings and 2FA (S1, ADR-0032)** | Migrations `20261025163627` and `20261025180600` applied to zggyl on 2026-10-26 (dry run and read-only pre-checks first). `account-security` deployed (new, `verify_jwt = true`) and `submit-application` redeployed. Branch pushed: the Preview and `sanctus.warpkit.online` serve it. Types regenerated (`f9644b7`). | `5f5adf1`, `f9644b7` | Live API check with the labelled QA owner, 2026-10-26: **31 of 31 passed**. Covered: 2FA on with an authenticator; a password-only session refused business data and security activity; the code step restores access; 8 recovery codes, a wrong code refused, a real one removes 2FA and wipes the rest; turning 2FA off refused at aal1, a wrong or reused emailed code refused; closure request takes the business offline, a second request refused, cancelling restores `active`. Every email arrived from `no-reply@sanctus.warpkit.online`. Cleanup: no factor left, QA business `active`. Not covered live: the Owner's policy switches, Reset 2FA and complete or restore closure (they need the Owner at aal2), and the clicks in the browser. |
+| **Business-logic fixes (S1.5)** | The 2026-10-26 business-logic audit fixes, built on the branch and **applied to the client test project `zggylkbgajamhriebdrg` on 2026-10-26**: migration `20261026041731` (dry run first) and 11 Edge Functions deployed (`review-application`, `notify-business-owner` and 9 changed ones). Staff 2FA and permission gate on Edge Functions, rejection with an optional reason shown to the applicant, owner notices, closure attribution, analytics and team fixes, and a demo mode that follows the same rules. Types regenerated (`b17c4ab`). Binding rulings: `docs/audits/2026-10-26-business-logic/RULINGS.md`. | `b17c4ab`, `c1b8e00`, `ea018db` | Live checks after the release: staff functions refuse unsigned calls (401); a business owner's session is refused by the staff gate (403 forbidden), so the 2FA and permission gate is live; an application without terms acceptance is refused (422); `/privacy` and `/terms` return 200; the live bundle contains the new wording and `review-application`. Migration read-back: new functions present, RLS on all new tables, role sets unchanged, anonymous callers cannot run the service functions. Final reviews of the database, functions and app were clean after two fix rounds. Tests: full unit suite 1328 passed and 2 failed at `16323aa` (two stale demo-mode expectations, fixed in `b7b4688`; no full re-run is recorded after that fix), build passes. Playwright demo-mode journeys on the integration branch: **desktop 142/142, mobile 5/5**. Not covered live: the clicks of every new screen in a real browser on the test site, and delivery of the new notice emails to real inboxes. |
+| **AR button fix and AR quick wins** | "View in my home" launches AR again (primary button, chips are labels only). Quick wins from the AR audit (`docs/audits/2026-10-26-ar/AR-AUDIT.md`): the AR action sits under the 3D stage on phones, a "Preparing AR" state with a 20 s timeout, honest wording on phones and in in-app browsers, a size label shown at AR, model size limits. Native only (ADR-0021): no AR-mode change. Pushed and live on the test site. | `8ba391c`, `439200b`, `7f4c00f` | Public e2e 10/10 after the button fix; AR unit and component tests 161/161 after the quick wins; independent review approved after one fix round. Simulated Pixel 7 profile only. **A test on real phones is still pending**: the checklist is in `docs/audits/2026-10-26-ar/AR-AUDIT.md`, "Real-device test checklist" (about 10 minutes). |
+| **Privacy Policy and Terms (static pages)** | Static `/privacy` and `/terms` in English and pt-PT, with footer links, an "I agree" tick on the apply form and at owner onboarding, and a 422 refusal when an application omits the acceptance. **They are drafts for the client's lawyer**, with placeholders for company facts. Nothing about the acceptance is stored yet. | `2686c02` | Pages return 200 on the test site. Unit suite and build passed on the branch at the time of the merge; review approved. Not legal advice and not reviewed by counsel. |
+| **Public-page and business fixes (S2)** | Tasks 1 and 3 live: public page fixes (stale product page after unpublish, demo follows the real rules) and the staged logo move with a partial clean-up report. Pushed with no database change. | `2eea854`, `02dc922` | Merged and included in the 1328-test full run at `16323aa`. No separate e2e run for S2 is recorded. Further S2 items are added here as they land. |
+| Public Preview | Vercel protection off (owner request, 2026-10-22). `main` and production unchanged. | n/a | https://ar-deploy-git-feature-sanctus-brand-design-system-track0.vercel.app opens with no login |
+
+## 2. Implemented, but not yet verified externally
+
+| Item | Status | Why not verified |
+|---|---|---|
+| **AR on real phones (Android Scene Viewer, iPhone Quick Look)** | Code and wording are live (see section 1). Checked only with a simulated Pixel 7 profile and by reading the code. | Needs a person with an ARCore Android phone and an iPhone. Checklist: `docs/audits/2026-10-26-ar/AR-AUDIT.md`, "Real-device test checklist". Three audit findings stay open until then: Scene Viewer untested on a device (AR-02), no USDZ on the QA products (AR-03), and the AR button position on phones. |
+| **S4 3D model requests** (request a model with 2–10 private photos, staff queue and delivery, owner email EN/PT, per-business own-upload switch; ADR-0034) | Released 2026-10-26 | Migration `20261026120000_s4_model_requests` applied to the client test project (private photo bucket, RLS on all new tables, Admin gained `models.manage`, the switch is on only for the business that already had 3D files); `review-model-request` (new, refuses unsigned calls) and `account-security` deployed; types regenerated; 285 DB + 1073 app tests, lint and build pass; e2e model-request journeys 6/6 desktop, 1/1 mobile. Live smoke checks in `docs/TEST_PLAN.md` (S4) still to run with real photos. |
+| **S2 Task 2** (read-only business form for view-only staff, field limits, the owner's closure notice) | Released 2026-10-26 | Migration `20261026075614_s2_business_logic` applied to the client test project (dry run first); unit suite green (4 load-related timeouts passed when re-run alone), lint and build pass; frontend pushed. |
+| **Platform team roles: Owner, Admin and Team (ADR-0029, ADR-0030)** | **Applied to `zggylkbgajamhriebdrg` on 2026-10-25** (migration plus `invite-member`, `manage-member`, `accept-member-invite`, and `provision-owner` redeployed). Live check passed: the invitation email was delivered with a working link; `/join` created the account; the Team role sees only its places and has no Publish or Delete; deactivating ends access; the history recorded each step; reusing the link is refused. Two test members (`delivered+team…@resend.dev`, deactivated) remain in the project. Built on the branch and tested in demo mode: 15 role permissions enforced by RLS, link invitations to `/join`, the Team & Access page, role permissions, member detail and access history. Migration `20261025070915_platform_team_roles.sql` and 3 Edge Functions are written and tested, but **not applied**. Until they are, the Preview works as before: Owners sign in through `platform_admins`, and Team & Access says it isn't switched on yet. | Applying it to `zggylkbgajamhriebdrg` needs the owner's go-ahead (plan Task 18). Invitation emails then reach real inboxes only once a sending domain is verified (B4). |
+
+## 3. Blocked (exact missing input)
+
+| # | Blocker | Needed from | Exact input |
+|---|---|---|---|
+| B1 | ~~Auth Site URL and redirects~~ Recorded done 2026-10-24; not re-verified (HANDOFF Live state) | n/a | n/a |
+| B2 | ~~Leaked-password protection~~ **Done 2026-10-24** (`password_hibp_enabled = true`, set through the Supabase Management API) | n/a | n/a |
+| B3 | ~~Resend key and webhook~~ **Done 2026-10-24** (temporary key; the old exposed "Sanctus server (Edge Functions)" key was revoked 2026-10-24). Still open: the real sender address and admin inbox (client decision). | Owner and client | n/a |
+| B4 | Sending domain | Client (DNS) | Verify a domain in Resend. Until then, mail only reaches the Resend account's own address. |
+| B5 | Webhook **done**. Auth SMTP through Resend **set 2026-10-24** (`smtp.resend.com:465`, user `resend`, the server key, sender "Sanctus" <onboarding@resend.dev>, Auth email limit 30 per hour). Still open: switch the SMTP sender to the verified domain, so Auth emails reach real inboxes. | After B4 | Auth → SMTP → sender address on the verified domain |
+| B6 | Application, admin, invitation and password-reset emails **delivered** (test inboxes). Still open: delivery to real inboxes (needs B4). | After B4 | n/a |
+| B7 | **Meshy-generated model** for the end-to-end model test | Owner | The actual GLB (and USDZ if available) file. No Meshy model exists in the repo or `AR-attachment/`. |
+| B8 | Real-device AR: Scene Viewer, Quick Look, true scale | A person with an ARCore Android phone and an iPhone | Steps are in `docs/SANCTUS_3D_AR_QA_REPORT.md`, section 7 |
+| B9 | ~~Push and check embedding on the Preview~~ **Done 2026-10-24** | n/a | n/a |
+| B10 | Legal facts for the Privacy Policy and Terms | Client | 42 facts: legal name and form, NIPC, registered office, commercial registry, share capital, production domain, contact mailboxes, retention periods, vendor accounts, fee model, court seat and more. Full numbered list: `docs/legal/drafts/README.md`, "Facts the client must supply". |
+| B11 | Lawyer review of the legal drafts | Client's lawyer | 27 open questions for counsel (cookie and consent position, controller roles, DSA and P2B scope, liability cap, language and more): `docs/legal/drafts/README.md`, "Open questions for counsel". The pages stay drafts until counsel approves. Some statements also need app work before they are true (same file, "What the app must do"). |
+| B12 | USDZ file per product for iPhone | Client | A USDZ for each product (and finish) that should open in Quick Look. Without one, iPhone AR depends on a phone-generated model. The QA products have none. See also the iOS decision in section 4. |
+| B13 | Real admin inbox for alerts | Client | The address that should receive business-closure and application alerts. Today they go to a test address that nobody reads. |
+
+## 4. Client decisions still open
+
+These are not to be decided silently.
+
+- **Product categories:** a fixed furniture list today, versus multi-industry (C10).
+- **Store-contact link:** keep or remove the per-product "Contact the store" link. It is kept under ADR-0023, but the scope says no store contact.
+- **Portuguese:** pt-PT or pt-BR (the copy currently mixes both).
+- **iOS:** is a USDZ mandatory per product and per finish, or is the phone-generated one acceptable?
+- **Domain:** the production domain, and whether catalogues use subdomains.
+- **Sender identity and admin inbox:** see B3.
+- **Analytics:** count every page view (today) or unique daily visitors.
+- **Landing quote attribution "— SANCTUS":** this is the client's reference copy, so the dash was kept.
+
+## 5. Test results
+
+Business-logic fixes S1.5 and the 2026-10-26 follow-ups: full unit suite **1328 passed, 2 failed** at `16323aa` (stale expectations, fixed in `b7b4688`), build passes; Playwright demo-mode journeys **desktop 142/142, mobile 5/5** (`c1b8e00`). Live checks are listed in section 1.
+
+Account settings S1, on the branch at `5f5adf1` (2026-10-26): typecheck, lint (0 errors) and build pass; `npm test` **868 passed, 15 skipped**; database tests **143 passed**; Playwright **121 passed**, 4 not verified (the browser crashed while the machine was low on memory, not a failed check); the pixel guard was not re-run after the final fixes. Live API check: 31 of 31 (section 1).
+
+Dashboard clarity pass A1, on the branch at tree `32ae117` (2026-10-25):
+- `npm test`: **564 passed, 15 skipped**. One run had an auth timing flake; that file passed 3 of 3 on its own and the next full run passed.
+- Playwright desktop + mobile: **98 passed**. This includes `a11y-dashboard.spec.ts` (no text under 12px, no uppercase, no horizontal scroll at 390).
+- Pixel guard: **14/14**, run with `--workers=1`. Under parallel load it can fail on glyph edges.
+- Typecheck, lint (0 errors) and build pass.
+- Every dashboard page was also checked against its Stitch screen on real client data, read-only.
+
+Team roles, on the branch (2026-10-25): `npm test` **439 passed, 15 skipped** (database rules on PGlite included), `npm run test:e2e` **38 passed** (6 new team journeys), typecheck, lint and build pass.
+
+Earlier run (tree `26c03a5`, 2026-10-24):
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | pass |
+| `npm run lint` | pass (0 errors, advisory warnings only) |
+| `npm test` | **311 passed, 15 skipped** (the live integration suite needs credentials). 3 consecutive runs green after two load-sensitive tests were made deterministic. |
+| `npx vitest run supabase/tests` | **50 passed** (includes the prepared migration) |
+| `npm run build` | pass |
+| `npm run test:e2e` (demo mode, desktop and mobile) | **32 passed** (adds the reset-password regression test) |
+| Preview journeys (on `a1e8392` and `422481b`) | 98 PASS, 0 open FAIL, 5 BLOCKED (devices, other-tenant writes), 1 NOT TESTED (on purpose) |
+
+## 6. Incident log
+
+- **2026-10-24, Auth settings on zggyl (then called the dev project; it is the live project as of 2026-10-27).** `supabase config push` auto-applied the repo's local-dev Auth config without prompting. It changed the Site URL and redirects, turned off MFA (TOTP) and email confirmations, set the email rate limit to 1 s, and **disabled email login** (`[auth.email] enable_signup` is the provider switch). All of it was reverted from a corrected config within about 30 minutes. Sign-in is verified working again, and sign-up still refused.
+- A newer CLI version also flipped `storage.analytics`; that was restored to on.
+- Still different from before: the SMS and phone OTP template text, which has no effect because both features are disabled.
+- `supabase/config.toml` now carries a warning not to push it.
+
+## 7. Known defects and limitations
+
+- DUX-06: the editor shows the publish checklist only after the first publish attempt. All problems now appear together in one pass.
+- Native AR doesn't work inside iframes, by browser design: the embed opens the Sanctus page for AR.
+- Any website may embed a published product. There is no per-business list of allowed sites.
+- Preview and dev share one Supabase project (D2). There is no separate staging.
+- SEC-22: whether the rate limit's `X-Forwarded-For` keying can be spoofed is unverified on the live edge.
+
+## 8. Next actions, in order
+
+1. ~~Apply team roles to the client project~~ Done 2026-10-25 (section 2).
+1. Client review of `https://sanctus.warpkit.online` with `docs/CLIENT_REVIEW_NOTES.md`.
+1. Owner: manual test on the Preview, including B7 (Meshy model).
+2. Client: sending domain, sender address and admin inbox (B3, B4), then switch the Resend and SMTP sender to it.
+3. B7 (Meshy model) and B8 (device AR) tests.
+4. Client decisions (section 4).
+5. Release S2 Task 2 (pending release, see section 2).
+6. **S4: 3D model requests.** Spec and plan are done and building on the integration branch `s4/integration`, not visible on the test site until released. Scope: a business requests a model with 2 to 10 photos, platform staff upload the finished GLB/USDZ and the business is emailed, and a per-business "allow own upload" switch (`docs/superpowers/plans/2026-10-26-s4-model-requests.md`).
+7. **Items still to confirm with the owner** (`docs/superpowers/plans/2026-10-26-next-scope.md`): the business online/offline switch plus platform suspend; the platform inbox setting; the privacy must-haves the legal text promises (a "Report content" link, a reason stored with staff takedowns, self-hosted fonts and 3D decoders, automatic deletion of old security logs, deleting the profile photo on closure); and the product-editor fixes moved to S4.
+
+## 9. Production release conditions
+
+The production release requires all of the following:
+- B1 to B8 are done and verified;
+- the production domain is configured, with Auth URLs for that domain;
+- separate production Supabase credentials (not the Preview's);
+- Vercel protection reviewed for production;
+- the owner's explicit approval to merge into `main` and switch the live site to the client project.
+
+None of this has been done, and production is **not** ready.
