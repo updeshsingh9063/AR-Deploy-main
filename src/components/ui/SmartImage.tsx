@@ -1,0 +1,30 @@
+import { ImageOff } from 'lucide-react'
+import { type ImgHTMLAttributes, useEffect, useState } from 'react'
+import { useI18n } from '@/i18n/LanguageProvider'
+import { cn } from '@/lib/cn'
+import { imageFrame } from '@/lib/imageFrames'
+
+/** <img> with a neutral fallback when the source is missing or fails to load. */
+export function SmartImage({ src, alt, className, fallbackLabel, ...rest }: ImgHTMLAttributes<HTMLImageElement> & { fallbackLabel?: string }) {
+  const { t } = useI18n()
+  const [failed, setFailed] = useState(!src)
+  useEffect(() => setFailed(!src), [src])
+  if (failed) {
+    return (
+      <div role="img" aria-label={alt || fallbackLabel || t('ui.image.unavailable')} className={cn('flex items-center justify-center bg-subtle text-ink-faint', className)}>
+        <ImageOff className="size-5" aria-hidden />
+      </div>
+    )
+  }
+  // object-cover is the default; a caller that sets its own object-fit (object-contain for a whole piece) replaces it.
+  const fit = className && /(^|\s)object-(contain|cover|fill|none|scale-down)(\s|$)/.test(className) ? undefined : 'object-cover'
+  return <img src={src} alt={alt ?? ''} className={cn('bg-subtle', fit, className)} onError={() => setFailed(true)} loading="lazy" decoding="async" {...rest} />
+}
+
+const PRODUCT_FRAME = imageFrame('product')
+
+/** A product photo thumbnail in the product frame (4:5, ADR-0064): the whole picture, never cropped by the box. */
+export function Thumb({ src, alt, size = 'md' }: { src?: string; alt: string; size?: 'sm' | 'md' | 'lg' }) {
+  const s = { sm: 'h-8 rounded-md', md: 'h-10 rounded-lg', lg: 'h-14 rounded-lg' }[size]
+  return <SmartImage src={src} alt={alt} className={cn(s, PRODUCT_FRAME.aspectClass, PRODUCT_FRAME.fitClass, 'shrink-0')} />
+}
