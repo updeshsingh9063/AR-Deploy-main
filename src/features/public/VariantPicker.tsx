@@ -1,0 +1,43 @@
+import { useId } from 'react'
+import type { Product } from '@/domain/types'
+import { LocalizedSpan, useI18n } from '@/i18n/LanguageProvider'
+import { cn } from '@/lib/cn'
+
+/**
+ * Finish swatches of a product (radio group): an uppercase label, the chosen finish's name under
+ * it (no price: public pages show none, ADR-0054), then square swatches with 2px corners. Product page and embed.
+ */
+export function VariantPicker({ product, selectedId, onSelect, className }: { product: Product; selectedId: string | undefined; onSelect: (id: string) => void; className?: string }) {
+  const { t, localized } = useI18n()
+  const headingId = useId()
+  const variant = product.variants.find((v) => v.id === selectedId)
+  if (!product.variants.length) return null
+  return (
+    <section className={className} aria-labelledby={headingId}>
+      <h2 id={headingId} className="text-[12px] leading-[1.4] font-medium tracking-[0.08em] uppercase text-ink-muted">
+        {t('product.colors')}
+      </h2>
+      {variant && (
+        <p className="mt-2 text-[15px] text-ink">
+          <LocalizedSpan text={variant.name} />
+        </p>
+      )}
+      <div role="radiogroup" aria-labelledby={headingId} className="mt-3 flex flex-wrap gap-2">
+        {product.variants.map((v) => (
+          <button
+            key={v.id}
+            type="button"
+            role="radio"
+            aria-checked={v.id === selectedId}
+            aria-label={localized(v.name)}
+            title={localized(v.name)}
+            onClick={() => onSelect(v.id)}
+            className={cn('grid size-11 place-items-center rounded-[var(--radius-control)] border transition-colors', v.id === selectedId ? 'border-ink' : 'border-transparent hover:border-line-strong')}
+          >
+            <span className="size-8 rounded-[var(--radius-control)] ring-1 ring-black/10 ring-inset" style={{ background: v.colorHex ?? 'var(--color-limestone)' }} aria-hidden />
+          </button>
+        ))}
+      </div>
+    </section>
+  )
+}
