@@ -1,0 +1,168 @@
+import type { Business, Product, ProductModels, ProductVariant } from '@/domain/types'
+import type { TranslationKey } from '@/i18n/dictionaries/en'
+import { type Vars, translate } from '@/i18n/translate'
+import { minorToInput, parseMoneyInput } from '@/lib/format'
+import type { ProductInput } from '@/services/catalogService'
+
+/** Editor form state: ProductInput plus raw text inputs for numbers. */
+export interface EditorForm {
+  input: ProductInput
+  priceText: string
+  dims: { width: string; height: string; depth: string }
+  weightText: string
+  slugTouched: boolean
+}
+
+export function emptyForm(business?: Business): EditorForm {
+  return {
+    input: {
+      businessId: business?.id ?? '',
+      slug: '',
+      name: { en: '' },
+      shortDescription: { en: '' },
+      description: { en: '' },
+      category: 'sofa',
+      price: 0,
+      currency: business?.defaultCurrency ?? 'EUR',
+      images: [],
+      models: {},
+      dimensions: { width: 0, height: 0, depth: 0, unit: 'cm' },
+      material: { en: '' },
+      weight: undefined,
+      variants: [],
+      cta: { label: { en: 'Contact seller', pt: 'Contactar vendedor' }, url: undefined },
+    },
+    priceText: '',
+    dims: { width: '', height: '', depth: '' },
+    weightText: '',
+    slugTouched: false,
+  }
+}
+
+export function formFromProduct(p: Product): EditorForm {
+  const { id: _id, createdAt: _c, updatedAt: _u, publishedAt: _p, status: _s, ...input } = p
+  void [_id, _c, _u, _p, _s]
+  const n = (v: number) => (v ? String(v) : '')
+  return {
+    input,
+    priceText: p.price ? minorToInput(p.price) : '',
+    dims: { width: n(p.dimensions.width), height: n(p.dimensions.height), depth: n(p.dimensions.depth) },
+    weightText: p.weight ? String(p.weight.value) : '',
+    slugTouched: true,
+  }
+}
+
+/**
+ * The unsaved form with the stored product's 3D files taken in (S4 final review): the product's models, each kept
+ * option's models (by id) and modelsChangedAt come from `stored`; every other field keeps what the user typed.
+ * An option the user added keeps its own files; one the user removed stays removed.
+ */
+export function withStoredModels(form: EditorForm, stored: Product): EditorForm {
+  const byId = new Map(stored.variants.map((v) => [v.id, v]))
+  return {
+    ...form,
+    input: {
+      ...form.input,
+      models: stored.models,
+      modelsChangedAt: stored.modelsChangedAt,
+      variants: form.input.variants.map((v) => {
+        const s = byId.get(v.id)
+        return s ? { ...v, models: s.models } : v
+      }),
+    },
+  }
+}
+
+/**
+ * The form with a variant that was stored outside it (ADR-0068: "New variant" in the 3D model request form) appended, so
+ * the next save keeps it. Every other field, including unsaved options, stays as typed; a variant already there is not added twice.
+ */
+export function withAddedVariant(form: EditorForm, variant: ProductVariant): EditorForm {
+  if (form.input.variants.some((v) => v.id === variant.id)) return form
+  return { ...form, input: { ...form.input, variants: [...form.input.variants, variant] } }
+}
+
+/**
+ * The form with fresh signed URLs for its stored 3D files (they expire, MEDIA_URL_TTL_SECONDS). Only a file still
+ * in the form (same storagePath) takes the stored URL and status; unsaved replacements and every other field stay.
+ */
+export function withFreshModelUrls(form: EditorForm, stored: Product): EditorForm {
+  const fresh = (models: ProductModels | undefined, from: ProductModels | undefined): ProductModels | undefined => {
+    if (!models) return models
+    const out = { ...models }
+    for (const f of ['glb', 'usdz'] as const) {
+      const cur = models[f]
+      const s = from?.[f]
+      if (cur?.storagePath && s && s.storagePath === cur.storagePath) out[f] = { ...cur, url: s.url, status: s.status }
+    }
+    return out
+  }
+  const byId = new Map(stored.variants.map((v) => [v.id, v]))
+  return {
+    ...form,
+    input: {
+      ...form.input,
+      models: fresh(form.input.models, stored.models) ?? {},
+      variants: form.input.variants.map((v) => (v.models ? { ...v, models: fresh(v.models, byId.get(v.id)?.models) } : v)),
+    },
+  }
+}
+
+const num = (s: string) => {
+  const v = parseFloat(s.replace(',', '.'))
+  return Number.isFinite(v) ? v : NaN
+}
+
+/**
+ * Converts the entered dimensions between units (one decimal, as saved). Text that is not a number is left as typed.
+ * `before` holds the values from before the previous conversion: converting straight back restores them exactly
+ * instead of compounding the rounding (83 cm → 32.7 in → 83 cm, not 83.1 cm; AR-10).
+ */
+export function convertDims(dims: EditorForm['dims'], from: 'cm' | 'in', to: 'cm' | 'in', before?: { unit: 'cm' | 'in'; dims: EditorForm['dims'] }): EditorForm['dims'] {
+  if (from === to) return dims
+  if (before && before.unit === to && JSON.stringify(convertDims(before.dims, before.unit, from)) === JSON.stringify(dims)) return before.dims
+  const factor = to === 'in' ? 1 / 2.54 : 2.54
+  const conv = (s: string) => {
+    const v = num(s.trim())
+    return s.trim() === '' || !Number.isFinite(v) ? s : String(Math.round(v * factor * 10) / 10)
+  }
+  return { width: conv(dims.width), height: conv(dims.height), depth: conv(dims.depth) }
+}
+
+/** Converts raw text fields to typed values. Returns client-side field errors. */
+export function toInput(form: EditorForm, t: (key: TranslationKey, vars?: Vars) => string = (key, vars) => translate('en', key, vars)): { input: ProductInput; errors: Record<string, string> } {
+  const errors: Record<string, string> = {}
+  const price = form.priceText.trim() === '' ? 0 : parseMoneyInput(form.priceText)
+  if (price === null) errors.price = t('products.form.priceFormat')
+  const dims = { width: 0, height: 0, depth: 0 }
+  for (const k of ['width', 'height', 'depth'] as const) {
+    const raw = form.dims[k].trim()
+    if (raw === '') continue
+    const v = num(raw)
+    if (!Number.isFinite(v) || v < 0) errors[`dimensions.${k}`] = t('common.validation.numberPositive')
+    else dims[k] = Math.round(v * 10) / 10
+  }
+  let weight: ProductInput['weight'] = undefined
+  if (form.weightText.trim()) {
+    const v = num(form.weightText)
+    if (!Number.isFinite(v) || v <= 0) errors.weight = t('products.form.weightInvalid')
+    else weight = { value: v, unit: form.input.weight?.unit ?? 'kg' }
+  }
+  const cleanVariants = form.input.variants
+    .filter((v) => v.name.en.trim())
+    .map((v) => ({ ...v, name: { en: v.name.en.trim(), ...(v.name.pt?.trim() ? { pt: v.name.pt.trim() } : {}) } }))
+  // An unnamed option is dropped on save, so one with anything entered (including its own files) must be named.
+  if (form.input.variants.some((v) => !v.name.en.trim() && (v.name.pt || v.sku || v.images?.length || v.models?.glb || v.models?.usdz))) errors.variants = t('products.form.variantName')
+  return {
+    input: {
+      ...form.input,
+      name: { ...form.input.name, en: form.input.name.en.trim() },
+      price: price ?? 0,
+      dimensions: { ...dims, unit: form.input.dimensions.unit },
+      weight,
+      variants: cleanVariants,
+      cta: { label: form.input.cta.label, url: form.input.cta.url?.trim() || undefined, ...(form.input.cta.hidden ? { hidden: true } : {}) },
+    },
+    errors,
+  }
+}

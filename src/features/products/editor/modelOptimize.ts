@@ -1,0 +1,174 @@
+// Safe GLB size optimization before upload (contract: "automatic model compression"; ADR-0019, ADR-0038).
+// Scene Viewer only accepts a few glTF extensions, so nothing here adds one: no Draco, meshopt, KTX2,
+// WebP or quantization. Lossless cleanup, downscaling textures larger than 2048 px (Google's limit for
+// Android AR) in the texture's own format, and, above 100,000 triangles, mesh simplification
+// (meshoptimizer, the algorithm @gltf-transform/cli uses). The output is re-read and compared with the
+// input; on any doubt the original file is kept. A meshopt-packed upload (gltfpack, Tripo "_meshopt") is always unpacked
+// into a plain GLB, even when that is larger: the packed file opens nowhere without a decoder (owner 2026-11-04).
+// Loaded only through modelOptimizeClient.ts (on unless VITE_MODEL_OPTIMIZATION=off; owner 2026-10-26).
+import { type Document, getBounds } from '@gltf-transform/core'
+import { dedup, prune, resample, simplify, weld } from '@gltf-transform/functions'
+import { MeshoptSimplifier } from 'meshoptimizer'
+import { glbIo, unpack } from './glbIo'
+
+/** Scene Viewer's maximum texture size (developers.google.com/ar/develop/scene-viewer). */
+export const MAX_TEXTURE_PX = 2048
+/** Google's guidance for phone AR: about 100,000 triangles (ADR-0038). Heavier models are simplified toward it. */
+export const MAX_TRIANGLES = 100_000
+/** Simplification never moves the surface more than this fraction of the model's size (0.1%: under 1 mm on a chair). */
+const SIMPLIFY_ERROR = 0.001
+/** The true size may move this much (relative) through simplification; beyond it the original is kept. */
+const SIZE_TOLERANCE = 0.005
+/** Keep the original unless the result is at least 5% smaller. */
+const MIN_SAVING = 0.05
+
+export interface OptimizeResult {
+  file: File
+  optimized: boolean
+  originalBytes: number
+  outputBytes: number
+  /** Why the original was kept (when optimized is false). */
+  reason?: string
+  /** Triangle counts before and after (equal when the model was not simplified). */
+  trianglesBefore?: number
+  trianglesAfter?: number
+}
+
+/** Returns a smaller encoding of the image in the same format, or null to leave it unchanged. */
+export type ImageResizer = (image: Uint8Array, mimeType: string, maxPx: number) => Promise<Uint8Array | null>
+
+export interface ModelSummary {
+  min: number[]
+  max: number[]
+  triangles: number
+  materials: number
+  extensions: string[]
+}
+
+export function summarize(doc: Document): ModelSummary {
+  const root = doc.getRoot()
+  const scene = root.getDefaultScene() ?? root.listScenes()[0]
+  const { min, max } = scene ? getBounds(scene) : { min: [0, 0, 0], max: [0, 0, 0] }
+  let triangles = 0
+  for (const mesh of root.listMeshes())
+    for (const prim of mesh.listPrimitives()) {
+      if (prim.getMode() !== 4) continue // TRIANGLES; other modes are counted as-is by vertex count below
+      triangles += (prim.getIndices()?.getCount() ?? prim.getAttribute('POSITION')?.getCount() ?? 0) / 3
+    }
+  return { min, max, triangles, materials: root.listMaterials().length, extensions: root.listExtensionsUsed().map((e) => e.extensionName).sort() }
+}
+
+/** Reason the optimized model is not equivalent to the original, or null when it is. */
+export function compareSummaries(before: ModelSummary, after: ModelSummary, opts: { simplified?: boolean } = {}): string | null {
+  const extent = Math.max(...before.max.map((v, i) => v - before.min[i]!), 0)
+  const tolerance = opts.simplified ? Math.max(0.001, extent * SIZE_TOLERANCE) : 0.001
+  const off = [...before.min, ...before.max].some((v, i) => Math.abs(v - [...after.min, ...after.max][i]!) > tolerance)
+  if (off) return 'its size changed'
+  if (opts.simplified ? after.triangles > before.triangles : before.triangles !== after.triangles) return 'its geometry changed'
+  if (after.materials > before.materials) return 'its materials changed'
+  if (after.extensions.some((e) => !before.extensions.includes(e))) return 'it would need a new glTF extension'
+  return null
+}
+
+/** Browser resizer: OffscreenCanvas, same MIME type. Skips images with transparency (canvas premultiplies alpha). */
+export const canvasResizer: ImageResizer = async (image, mimeType, maxPx) => {
+  if (typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap !== 'function') return null
+  const bmp = await createImageBitmap(new Blob([image as BlobPart], { type: mimeType }), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+  const scale = maxPx / Math.max(bmp.width, bmp.height)
+  if (scale >= 1) return null
+  const w = Math.round(bmp.width * scale)
+  const h = Math.round(bmp.height * scale)
+  if (mimeType === 'image/png') {
+    // Alpha channels (cut-outs, packed data) would lose precision through the 2D canvas: leave them alone.
+    const probe = new OffscreenCanvas(bmp.width, bmp.height).getContext('2d')!
+    probe.drawImage(bmp, 0, 0)
+    const px = probe.getImageData(0, 0, bmp.width, bmp.height).data
+    for (let i = 3; i < px.length; i += 4) if (px[i]! < 255) return null
+  }
+  const canvas = new OffscreenCanvas(w, h)
+  const ctx = canvas.getContext('2d')!
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(bmp, 0, 0, w, h)
+  const blob = await canvas.convertToBlob({ type: mimeType, quality: mimeType === 'image/jpeg' ? 0.9 : undefined })
+  return blob.type === mimeType ? new Uint8Array(await blob.arrayBuffer()) : null // encoder missing: keep original
+}
+
+/** The model's size in metres on each axis (glTF units), or null when the file cannot be read or has no geometry. */
+export async function measureGlb(glb: Uint8Array): Promise<{ x: number; y: number; z: number } | null> {
+  try {
+    const s = summarize(await (await glbIo()).readBinary(glb))
+    const [x, y, z] = s.max.map((v, i) => v - s.min[i]!) as [number, number, number]
+    return [x, y, z].every((v) => Number.isFinite(v) && v > 0) ? { x, y, z } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Scales the whole model by one factor (ADR-0058, the upload scale control; only ever called after the person chose it).
+ * The default scene's root nodes are moved under one new root node whose scale is [f, f, f]: proportions, geometry, textures
+ * and animations stay as they are, and a root node's own scale is kept (it multiplies). A packed (meshopt) file is written
+ * plain, as everywhere else. The result is re-read and its bounds and triangle count checked; any doubt throws.
+ */
+export async function applyUniformScale(glb: Uint8Array, factor: number): Promise<Uint8Array> {
+  if (!Number.isFinite(factor) || factor <= 0) throw new Error('The scale factor must be a positive number.')
+  const io = await glbIo()
+  const doc = await io.readBinary(glb)
+  const before = summarize(doc)
+  await unpack(doc)
+  const scene = doc.getRoot().getDefaultScene() ?? doc.getRoot().listScenes()[0]
+  if (!scene) throw new Error('The model has no scene to scale.')
+  const wrapper = doc.createNode('ScaleFix').setScale([factor, factor, factor])
+  for (const child of scene.listChildren()) {
+    scene.removeChild(child)
+    wrapper.addChild(child)
+  }
+  scene.addChild(wrapper)
+  const out = await io.writeBinary(doc)
+  const after = summarize(await io.readBinary(out))
+  const close = (a: number, b: number) => Math.abs(a - b) <= Math.max(1e-6, Math.abs(b) * 1e-4)
+  const bounds = [...before.min, ...before.max].map((v) => v * factor)
+  if (![...after.min, ...after.max].every((v, i) => close(v, bounds[i]!)) || after.triangles !== before.triangles) throw new Error('The scaled model did not measure as expected.')
+  return out
+}
+
+export async function optimizeGlb(file: File, resize: ImageResizer = canvasResizer): Promise<OptimizeResult> {
+  const originalBytes = file.size
+  const keep = (reason: string): OptimizeResult => ({ file, optimized: false, originalBytes, outputBytes: originalBytes, reason })
+  try {
+    const io = await glbIo()
+    const doc = await io.readBinary(new Uint8Array(await file.arrayBuffer()))
+    const before = summarize(doc)
+    const unpacked = await unpack(doc)
+    await doc.transform(dedup(), prune(), resample())
+    const simplified = before.triangles > MAX_TRIANGLES
+    if (simplified) {
+      await MeshoptSimplifier.ready
+      await doc.transform(weld(), simplify({ simplifier: MeshoptSimplifier, ratio: MAX_TRIANGLES / before.triangles, error: SIMPLIFY_ERROR }), prune())
+    }
+    for (const texture of doc.getRoot().listTextures()) {
+      const mime = texture.getMimeType()
+      const size = texture.getSize()
+      const image = texture.getImage()
+      if (!image || !size || Math.max(...size) <= MAX_TEXTURE_PX || (mime !== 'image/png' && mime !== 'image/jpeg')) continue
+      const resized = await resize(image, mime, MAX_TEXTURE_PX)
+      if (resized && resized.byteLength < image.byteLength) texture.setImage(resized)
+    }
+    const out = await io.writeBinary(doc)
+    const after = summarize(await io.readBinary(out))
+    const counts = { trianglesBefore: before.triangles, trianglesAfter: before.triangles }
+    const problem = compareSummaries(before, after, { simplified })
+    if (problem) return { ...keep(`Kept the original: optimizing would have meant ${problem}.`), ...counts }
+    if (!unpacked && out.byteLength > originalBytes * (1 - MIN_SAVING)) return { ...keep('Kept the original: it is already compact.'), ...counts }
+    return {
+      file: new File([out as BlobPart], file.name, { type: file.type }),
+      optimized: true,
+      originalBytes,
+      outputBytes: out.byteLength,
+      trianglesBefore: before.triangles,
+      trianglesAfter: after.triangles,
+    }
+  } catch {
+    return keep('Kept the original: the file could not be optimized safely.')
+  }
+}
