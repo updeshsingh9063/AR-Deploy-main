@@ -1,0 +1,476 @@
+import { useCan } from '@/auth/usePermission'
+import { ArrowUpRight, ChevronsLeft, ChevronsRight, LogOut, Menu, Repeat, ShieldCheck, UserRound, X } from 'lucide-react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
+import { useAccount } from '@/auth/AccountProvider'
+import { useLeaveAccount } from '@/auth/RequireRole'
+import { SecurityNoticeSlot } from '@/auth/securityNotice'
+import { cn } from '@/lib/cn'
+import { useFormat } from '@/lib/useFormat'
+import { catalogLocalPath, settingsPath } from '@/lib/urls'
+import { settingsReturnState } from '@/lib/settingsReturn'
+import { isDemoMode } from '@/services'
+import { account } from '@/services'
+import { useServiceQuery } from '@/services/hooks'
+import { useMyProfile } from '@/features/settings/useMyProfile'
+import { useI18n } from '@/i18n/LanguageProvider'
+import { useThemeMenuItems } from '@/theme/ThemeChoiceControl'
+import { Avatar } from '../ui/Avatar'
+import { PageSkeleton } from '../ui/PageSkeleton'
+import { IconButton } from '../ui/Button'
+import { LanguageSwitcher } from '../ui/LanguageSwitcher'
+import { DropdownMenu } from '../ui/Menu'
+import { useFocusTrap } from '../ui/Modal'
+import { BrandMark, Wordmark } from '../ui/BrandMark'
+import { InlineNotice } from '../ui/States'
+import { DashboardContext, type DashboardContextValue, useDashboard, usePendingApplications, useRequestedModelRequests } from './dashboardContext'
+import { BreadcrumbSlotContext, type BreadcrumbSlot } from './PageHeader'
+import type { NavItem } from './nav'
+import { NotificationBell } from './NotificationBell'
+
+const SIDEBAR_KEY = 'arfurn:sidebar'
+
+type Variant = 'admin' | 'business'
+
+function readCollapsed() {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function DashboardShell({ nav: allNav, variant }: { nav: NavItem[]; variant: Variant }) {
+  // Only the places this platform role may open (ADR-0029); business owners have no `requires` items.
+  const can = useCan()
+  const { t } = useI18n()
+  const nav = useMemo(() => allNav.filter((i) => !i.requires || can(i.requires)), [allNav, can])
+  const [collapsed, setCollapsed] = useState(readCollapsed)
+  const [mobileOpen, setMobileOpen] = useState(false)
+  // The top bar's breadcrumb slot: a page header portals its path in here and the default trail steps aside.
+  const [crumbSlot, setCrumbSlot] = useState<HTMLElement | null>(null)
+  const [hasCrumbs, setHasCrumbs] = useState(false)
+  const location = useLocation()
+  const { business } = useAccount()
+
+  useEffect(() => setMobileOpen(false), [location.pathname])
+  // Dialogs, menus and toasts render in portals under <body>, outside the shell root: mark the body too so the
+  // dashboard type (Inter) reaches them. Removed on leaving the dashboard so public pages never carry it.
+  useEffect(() => {
+    document.body.dataset.surface = 'dashboard'
+    return () => {
+      delete document.body.dataset.surface
+    }
+  }, [])
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0')
+    } catch {
+      // Storage can be unavailable (private mode); the sidebar just forgets its state.
+    }
+  }, [collapsed])
+
+  const ctx = useMemo<DashboardContextValue>(
+    () =>
+      variant === 'admin'
+        ? { variant, home: 'Sanctus Admin', homeTo: '/admin', eyebrow: t('ui.shell.platformAdmin') }
+        : { variant, home: business?.name ?? t('ui.shell.myBusiness'), homeTo: '/dashboard', eyebrow: t('ui.shell.businessDashboard') },
+    [variant, business?.name, t],
+  )
+
+  const crumbs = useMemo<BreadcrumbSlot>(() => ({ slot: crumbSlot, setHasCrumbs }), [crumbSlot])
+
+  return (
+    <DashboardContext.Provider value={ctx}>
+      <BreadcrumbSlotContext.Provider value={crumbs}>
+      <div data-surface="dashboard" className="min-h-dvh bg-canvas" style={{ '--sidebar-w': collapsed ? '72px' : '256px' } as React.CSSProperties}>
+        <a href="#main" className="sr-only z-50 rounded bg-surface px-3 py-2 focus:not-sr-only focus:fixed focus:top-2 focus:left-2">
+          {t('ui.shell.skip')}
+        </a>
+        {/* Desktop sidebar */}
+        <aside
+          className={cn(
+            // On the dark theme the sidebar is almost the ground colour, so a hairline carries the edge.
+            'fixed inset-y-0 left-0 z-30 hidden flex-col bg-obsidian text-chalk transition-[width] duration-150 lg:flex dark:border-r dark:border-white/10',
+            collapsed ? 'w-[72px]' : 'w-64',
+          )}
+        >
+          <SidebarContent
+            nav={nav}
+            variant={variant}
+            collapsed={collapsed}
+            footer={
+              <button
+                type="button"
+                onClick={() => setCollapsed((c) => !c)}
+                aria-label={collapsed ? t('ui.shell.expand') : t('ui.shell.collapse')}
+                aria-expanded={!collapsed}
+                className={cn(
+                  'flex h-9 w-full items-center gap-3 rounded-[var(--radius-control)] px-3 text-[13px] text-chalk/70 hover:bg-white/5 hover:text-chalk focus-visible:outline-accent-bright',
+                  collapsed && 'justify-center px-0',
+                )}
+              >
+                {collapsed ? <ChevronsRight className="size-4 shrink-0" aria-hidden /> : <ChevronsLeft className="size-4 shrink-0" aria-hidden />}
+                {!collapsed && t('ui.shell.collapseShort')}
+              </button>
+            }
+          />
+        </aside>
+
+        {/* Mobile drawer */}
+        {mobileOpen && <MobileDrawer nav={nav} variant={variant} onClose={() => setMobileOpen(false)} />}
+
+        <div className={cn('transition-[padding] duration-150', collapsed ? 'lg:pl-[72px]' : 'lg:pl-64')}>
+          <Topbar onMenu={() => setMobileOpen(true)} nav={nav} variant={variant} slotRef={setCrumbSlot} hasCrumbs={hasCrumbs} />
+          <main id="main" tabIndex={-1} className="mx-auto w-full max-w-[1320px] px-4 pt-6 pb-16 outline-none sm:px-6 lg:px-10 lg:pt-10">
+            <SecurityNoticeSlot />
+            {variant === 'business' && <CatalogStatusNotice />}
+            <Suspense fallback={<PageSkeleton />}>
+              <Outlet />
+            </Suspense>
+          </main>
+        </div>
+      </div>
+      </BreadcrumbSlotContext.Provider>
+    </DashboardContext.Provider>
+  )
+}
+
+/**
+ * Every owner page says when customers cannot see the catalogue (DUX-01). Approved applications become draft
+ * businesses that stay private until a platform admin activates them (ADR-0024); a platform admin can also pause
+ * (inactivate) an active catalogue.
+ */
+export function CatalogStatusNotice() {
+  const { business } = useAccount()
+  const { t } = useI18n()
+  // Read again when the business changes (a closure request or its cancellation changes the status).
+  const security = useServiceQuery(() => account.getSecurityState(), [business?.id, business?.status, business?.updatedAt])
+  if (!business || business.status === 'active') return null
+  // Until the closure state is known, say nothing rather than a notice that may be the wrong one; on its error, the status notice.
+  if (security.status === 'loading' && !security.data) return null
+  if (security.data?.closure)
+    return (
+      <InlineNotice tone="warning" className="mb-6">
+        {t('ui.notice.closureBefore')}{' '}
+        <Link to={settingsPath('business', 'account')} className="font-medium underline underline-offset-2">
+          {t('ui.notice.closureLink')}
+        </Link>
+        {t('ui.notice.closureAfter')}
+      </InlineNotice>
+    )
+  const preview = (
+    <a href={catalogLocalPath(business, { preview: true })} target="_blank" rel="noopener" className="font-medium underline underline-offset-2">
+      {t('ui.notice.preview')}
+    </a>
+  )
+  return (
+    <InlineNotice tone="warning" className="mb-6">
+      {business.status === 'draft' ? (
+        <>
+          <strong className="font-medium">{t('ui.notice.draftTitle', { name: business.name })}</strong> {t('ui.notice.draftBody')} {preview}
+        </>
+      ) : (
+        <>
+          <strong className="font-medium">{t('ui.notice.pausedTitle')}</strong> {t('ui.notice.pausedBody')} {preview}
+        </>
+      )}
+    </InlineNotice>
+  )
+}
+
+function Brand({ collapsed, variant }: { collapsed?: boolean; variant: Variant }) {
+  const { business } = useAccount()
+  const { t } = useI18n()
+  const label = variant === 'business' ? (business?.name ?? t('ui.shell.businessDashboard')) : t('ui.shell.adminConsole')
+  const to = variant === 'business' ? '/dashboard' : '/admin'
+  if (collapsed) {
+    return (
+      <Link to={to} aria-label={variant === 'business' ? t('ui.shell.brandBusiness', { label }) : t('ui.shell.brandAdmin')} className="grid size-10 place-items-center rounded-[var(--radius-control)] focus-visible:outline-accent-bright">
+        <BrandMark className="size-7 text-chalk" />
+      </Link>
+    )
+  }
+  return (
+    <Link to={to} className="flex min-w-0 flex-col items-start gap-1.5 rounded-[var(--radius-control)] focus-visible:outline-accent-bright">
+      <span data-wordmark className="flex">
+        <Wordmark size={15} className="text-chalk" />
+      </span>
+      <span className="max-w-full truncate text-[length:var(--text-ui-small)] leading-[1.3] text-chalk/70">{label}</span>
+    </Link>
+  )
+}
+
+/** Repeated intent signals (pointer enter, then focus, then touch) start a preload once; a later visit after a pause starts it again. */
+const INTENT_REPEAT_MS = 5000
+const lastIntent = new WeakMap<() => void, number>()
+function intentProps(preload: (() => void) | undefined) {
+  if (!preload) return {}
+  const fire = () => {
+    const now = Date.now()
+    if (now - (lastIntent.get(preload) ?? -Infinity) < INTENT_REPEAT_MS) return
+    lastIntent.set(preload, now)
+    preload()
+  }
+  return { onPointerEnter: fire, onFocus: fire, onTouchStart: fire }
+}
+
+function NavBadge({ kind, collapsed }: { kind: NonNullable<NavItem['badge']>; collapsed?: boolean }) {
+  const { t } = useI18n()
+  const { number: formatNumber } = useFormat()
+  const applications = usePendingApplications(kind === 'pendingApplications')
+  const requests = useRequestedModelRequests(kind === 'requestedModelRequests')
+  const n = (kind === 'pendingApplications' ? applications.data?.total : requests.data) ?? 0
+  if (!n) return null
+  const text = n > 99 ? '99+' : formatNumber(n)
+  return (
+    <>
+      <span className="sr-only">, {formatNumber(n)} {kind === 'pendingApplications' ? t('ui.shell.awaitingReview') : t('ui.shell.waitingToStart')}</span>
+      <span
+        aria-hidden
+        className={cn(
+          'grid h-[18px] min-w-[18px] place-items-center rounded-[var(--radius-control)] bg-accent-bright px-1 text-[12px] leading-none font-semibold text-obsidian tabular-nums',
+          collapsed ? 'absolute top-0.5 right-1.5' : 'ml-auto',
+        )}
+      >
+        {text}
+      </span>
+    </>
+  )
+}
+
+function SidebarContent({
+  nav,
+  variant,
+  collapsed,
+  onNavigate,
+  footer,
+}: {
+  nav: NavItem[]
+  variant: Variant
+  collapsed?: boolean
+  onNavigate?: () => void
+  footer?: React.ReactNode
+}) {
+  const { pathname, search } = useLocation()
+  const { t } = useI18n()
+  return (
+    <>
+      <div className={cn('flex min-h-[84px] items-center border-b border-white/10', collapsed ? 'justify-center px-2' : 'px-5')}>
+        <Brand collapsed={collapsed} variant={variant} />
+      </div>
+      {/* The user block sits inside the "Main" navigation so Log out stays with the other places to go. */}
+      <nav aria-label={t('ui.shell.main')} className="flex min-h-0 flex-1 flex-col">
+        <ul className="flex-1 space-y-0.5 overflow-y-auto px-3 py-4">
+          {nav.map((item) => (
+            <li key={item.to}>
+              <NavLink
+                to={item.to}
+                end={item.end}
+                state={item.returnsHere ? settingsReturnState(pathname + search) : undefined}
+                onClick={onNavigate}
+                {...intentProps(item.preload)}
+                title={collapsed ? t(item.labelKey) : undefined}
+                className={({ isActive }) =>
+                  cn(
+                    'relative flex h-10 items-center gap-3 rounded-[var(--radius-control)] px-3 text-[length:var(--text-ui-body)] transition-colors focus-visible:outline-accent-bright',
+                    collapsed && 'justify-center px-0',
+                    isActive
+                      ? 'bg-white/[0.08] font-medium text-chalk before:absolute before:inset-y-2 before:left-0 before:w-[2px] before:bg-accent-bright'
+                      : 'text-chalk/70 hover:bg-white/[0.04] hover:text-chalk',
+                  )
+                }
+              >
+                <item.icon className="size-[18px] shrink-0" strokeWidth={1.6} aria-hidden />
+                <span className={cn('truncate', collapsed && 'sr-only')}>{t(item.labelKey)}</span>
+                {item.badge && <NavBadge kind={item.badge} collapsed={collapsed} />}
+              </NavLink>
+            </li>
+          ))}
+        </ul>
+        {footer && <div className="px-3 pb-2">{footer}</div>}
+        <UserBlock collapsed={collapsed} variant={variant} />
+      </nav>
+    </>
+  )
+}
+
+function UserBlock({ collapsed, variant }: { collapsed?: boolean; variant: Variant }) {
+  const { user } = useAccount()
+  const { t } = useI18n()
+  const { profile } = useMyProfile()
+  const leave = useLeaveAccount()
+  const themeItems = useThemeMenuItems()
+  const navigate = useNavigate()
+  const { pathname, search } = useLocation()
+  const iconBtn =
+    'grid size-8 shrink-0 place-items-center rounded-[var(--radius-control)] text-chalk/70 hover:bg-white/[0.06] hover:text-chalk focus-visible:outline-accent-bright pointer-coarse:size-11'
+  // The name and photo set in Profile settings win; until they load (or if they can't), the account's own name.
+  const name = profile?.displayName || user?.name || t('ui.shell.signedIn')
+  // Settings is full-screen; its close button comes back to this page.
+  const openSettings = (section: 'account' | 'security') => navigate(settingsPath(variant, section), { state: settingsReturnState(pathname + search) })
+  const menu = (
+    // The menu sits at the foot of the sidebar, so it opens upwards (the descendant classes place it above the trigger).
+    <div className={cn('[&_[role=menu]]:bottom-full [&_[role=menu]]:mb-1', !collapsed && 'flex min-w-0 flex-1 [&>div]:min-w-0 [&>div]:flex-1')}>
+      <DropdownMenu
+        label={t('ui.shell.accountMenu', { name })}
+        align="start"
+        items={[
+          { label: t('ui.shell.accountSettings'), icon: <UserRound />, onSelect: () => openSettings('account') },
+          { label: t('ui.shell.security'), icon: <ShieldCheck />, onSelect: () => openSettings('security') },
+          'separator',
+          ...themeItems,
+          'separator',
+          { label: t('ui.shell.signOut'), icon: <LogOut />, onSelect: () => void leave({ signOut: true }) },
+        ]}
+        triggerClassName={cn(
+          'h-auto! w-full! justify-start! gap-2.5 p-1! text-left text-chalk! hover:bg-white/[0.06]! hover:text-chalk! focus-visible:outline-accent-bright',
+          collapsed && 'w-auto! justify-center!',
+        )}
+        trigger={
+          <>
+            {user ? <Avatar name={name} src={profile?.avatarUrl} size={32} tone="dark" /> : <UserRound className="size-4" aria-hidden />}
+            {!collapsed && (
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[length:var(--text-ui-body)] font-medium text-chalk">{name}</span>
+                <span className="block truncate text-[12px] text-chalk/65">
+                  {user?.email}
+                  {isDemoMode && ` · ${t('ui.shell.demo')}`}
+                </span>
+              </span>
+            )}
+          </>
+        }
+      />
+    </div>
+  )
+  const actions = (
+    <>
+      <button
+        type="button"
+        // Supabase mode: the sign-in page sends a signed-in user straight back, so end the session first.
+        onClick={() => void leave({ signOut: !isDemoMode })}
+        aria-label={t('ui.shell.switchAccount')}
+        title={t('ui.shell.switchAccount')}
+        className={iconBtn}
+      >
+        <Repeat className="size-4" aria-hidden />
+      </button>
+      <button type="button" onClick={() => void leave({ signOut: true })} aria-label={t('ui.shell.logOut')} title={t('ui.shell.logOut')} className={iconBtn}>
+        <LogOut className="size-4" aria-hidden />
+      </button>
+    </>
+  )
+  return (
+    <div className={cn('border-t border-white/10 p-3', collapsed ? 'flex flex-col items-center gap-1' : 'flex items-center gap-1')}>
+      {menu}
+      {actions}
+    </div>
+  )
+}
+
+function MobileDrawer({ nav, variant, onClose }: { nav: NavItem[]; variant: Variant; onClose: () => void }) {
+  const { t } = useI18n()
+  const ref = useRef<HTMLDivElement>(null)
+  useFocusTrap(ref, true, onClose)
+  return (
+    <div className="fixed inset-0 z-40 lg:hidden">
+      <div className="absolute inset-0 animate-fade-in bg-obsidian/50" onClick={onClose} aria-hidden />
+      <div ref={ref} role="dialog" aria-modal="true" aria-label={t('ui.shell.navigation')} className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col bg-obsidian text-chalk shadow-[var(--shadow-pop)]">
+        <button
+          type="button"
+          aria-label={t('ui.shell.closeNavigation')}
+          onClick={onClose}
+          className="absolute top-5 right-3 grid size-11 place-items-center rounded-[var(--radius-control)] text-chalk/75 hover:bg-white/[0.06] hover:text-chalk focus-visible:outline-accent-bright"
+        >
+          <X className="size-5" aria-hidden />
+        </button>
+        <SidebarContent nav={nav} variant={variant} onNavigate={onClose} footer={<LanguageSwitcher className="px-3 text-chalk" />} />
+      </div>
+    </div>
+  )
+}
+
+/** The nav item the current path belongs to (longest match), for the top bar's breadcrumb. */
+function useSection(nav: NavItem[]) {
+  const { pathname } = useLocation()
+  return [...nav]
+    .filter((i) => pathname === i.to || (!i.end && pathname.startsWith(`${i.to}/`)))
+    .sort((a, b) => b.to.length - a.to.length)[0]
+}
+
+function Topbar({
+  onMenu,
+  nav,
+  variant,
+  slotRef,
+  hasCrumbs,
+}: {
+  onMenu: () => void
+  nav: NavItem[]
+  variant: Variant
+  slotRef: (el: HTMLElement | null) => void
+  hasCrumbs: boolean
+}) {
+  const section = useSection(nav)
+  const { t } = useI18n()
+  const { business } = useAccount()
+  const { home, homeTo } = useDashboard() ?? { home: 'Sanctus', homeTo: '/' }
+  return (
+    <header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-line bg-canvas px-4 sm:px-6 lg:px-10">
+      <IconButton aria-label={t('ui.shell.openNavigation')} onClick={onMenu} className="-ml-2 lg:hidden pointer-coarse:size-11">
+        <Menu className="size-5" />
+      </IconButton>
+      <Link to={homeTo} aria-label={t('ui.shell.dashboardHome')} className="text-ink lg:hidden">
+        <span data-wordmark className="flex">
+          <Wordmark size={12} />
+        </span>
+      </Link>
+      {/* A page with its own path (breadcrumbs prop) portals it here; otherwise the default trail below shows. */}
+      <div ref={slotRef} className="contents" />
+      {!hasCrumbs && (
+      <nav aria-label={t('ui.shell.youAreHere')} className="hidden min-w-0 lg:block">
+        <ol className="flex min-w-0 items-center gap-1.5 text-[length:var(--text-ui-body)] text-ink-muted">
+          <li className="min-w-0 truncate">
+            <Link to={homeTo} className="hover:text-ink hover:underline">
+              {home}
+            </Link>
+          </li>
+          {section && (
+            <>
+              <li aria-hidden className="text-ink-muted">
+                /
+              </li>
+              <li aria-current="page" className="truncate font-medium text-ink">
+                {t(section.labelKey)}
+              </li>
+            </>
+          )}
+        </ol>
+      </nav>
+      )}
+      <div className="ml-auto flex items-center gap-2">
+        {/* The same switch as the landing page; on phones it sits in the navigation menu instead. */}
+        <LanguageSwitcher className="max-sm:hidden" />
+        {/* Honest labelling in the demo; a production owner has no use for the data source's name (DUX-08). */}
+        {isDemoMode && (
+          <span className="hidden border border-line-strong px-2.5 py-0.5 text-[12px] leading-tight text-ink-muted sm:inline">{t('ui.shell.demoMode')}</span>
+        )}
+        <NotificationBell variant={variant} />
+        {variant === 'business' && business && (
+          <a
+            href={catalogLocalPath(business, { preview: business.status !== 'active' })}
+            target="_blank"
+            rel="noopener"
+            className="inline-flex min-h-10 items-center gap-1.5 px-2 text-[length:var(--text-ui-body)] font-medium text-ink hover:underline pointer-coarse:min-h-11"
+          >
+            <span className="hidden sm:inline">{business.status === 'active' ? t('ui.shell.viewCatalog') : t('ui.shell.previewCatalog')}</span>
+            <span className="sm:hidden">{t('ui.shell.catalog')}</span>
+            <ArrowUpRight className="size-4" aria-hidden />
+            <span className="sr-only">{t('ui.shell.newTab')}</span>
+          </a>
+        )}
+      </div>
+    </header>
+  )
+}
